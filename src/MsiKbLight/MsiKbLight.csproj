@@ -17,6 +17,10 @@
          so the tool keeps working after .NET 8 reaches end of support and is removed. -->
     <RollForward>Major</RollForward>
     <SatelliteResourceLanguages>en;ja</SatelliteResourceLanguages>
+    <!-- Keep the deployment to three files: the .dll (debug symbols embedded), its runtimeconfig.json
+         (required by dotnet.exe) and msikblight.cmd. There are no package dependencies, so no deps.json. -->
+    <DebugType>embedded</DebugType>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
     <Version>2.0.0</Version>
   </PropertyGroup>
 

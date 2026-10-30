@@ -22,7 +22,13 @@ dotnet publish src\MsiKbLight -c Release -o publish
 dotnet test tests\MsiKbLight.Tests            # 単体テスト（プロトコル・設定ファイル・翻訳）
 ```
 
-`publish\` に `msikblight.dll` と `msikblight.cmd` ができる。
+`publish\` に次の 3 ファイルができる（この 3 つを同じフォルダに置けば動く）。
+
+| ファイル | 役割 |
+|---|---|
+| `msikblight.cmd` | 起動用（ダブルクリックで GUI、引数付きで CLI） |
+| `msikblight.dll` | 本体（デバッグ情報は埋め込み済み） |
+| `msikblight.runtimeconfig.json` | `dotnet.exe` が本体を起動するのに必須の設定 |
 
 ### exe を作らない理由（Smart App Control）
 
