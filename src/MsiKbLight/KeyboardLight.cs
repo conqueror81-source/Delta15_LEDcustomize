@@ -1,3 +1,5 @@
+using System.ComponentModel;
+
 namespace MsiKbLight;
 
 public enum LightMode : byte
@@ -10,6 +12,9 @@ public enum LightMode : byte
     ColorShift = 5,
     Rainbow = 6,
 }
+
+internal sealed class DeviceNotFoundException()
+    : Exception("MysticLight MS-1562 controller (VID 1462, PID 1562-1564) not found.");
 
 /// <summary>
 /// Protocol of the "MysticLight MS-1562" keyboard lighting MCU (VID 0x1462, PID 0x1562-0x1564),
@@ -29,7 +34,7 @@ internal sealed class KeyboardLight : IDisposable
     public const int MaxBrightness = 10;
     public const int MaxSpeed = 2;
 
-    private const int ReportLength = 64;
+    internal const int ReportLength = 64;
     private const byte LedReportId = 0x02;
     private const byte CommandReportId = 0x01;
     private const byte CmdQuery = 0x91;
@@ -62,6 +67,28 @@ internal sealed class KeyboardLight : IDisposable
         }
     }
 
+    /// <summary>
+    /// Opens the controller and writes the settings, retrying until the timeout: right after boot or resume
+    /// the device can take a while to enumerate and may reject the first reports.
+    /// </summary>
+    public static void WriteWithRetry(LightSettings settings, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            try
+            {
+                using var light = Open() ?? throw new DeviceNotFoundException();
+                light.Write(settings);
+                return;
+            }
+            catch (Exception ex) when ((ex is DeviceNotFoundException or Win32Exception or IOException) && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(1000);
+            }
+        }
+    }
+
     public LightSettings Read()
     {
         var cmd = Enumerable.Repeat(Filler, ReportLength).ToArray();
@@ -69,23 +96,12 @@ internal sealed class KeyboardLight : IDisposable
         cmd[1] = CmdQuery;
         cmd[2] = QueryLedSetting;
         _device.SetFeature(cmd);
-
-        var data = _device.GetFeature(LedReportId);
-        var count = Math.Clamp((int)data[5], 1, MaxColors);
-        var colors = new List<string>();
-        for (int i = 0; i < count; i++)
-            colors.Add($"{data[6 + i * 3]:X2}{data[7 + i * 3]:X2}{data[8 + i * 3]:X2}");
-
-        return new LightSettings
-        {
-            Mode = Enum.IsDefined(typeof(LightMode), data[2]) ? (LightMode)data[2] : LightMode.Off,
-            Speed = data[3],
-            Brightness = data[4],
-            Colors = colors,
-        };
+        return DecodeReport(_device.GetFeature(LedReportId));
     }
 
-    public void Write(LightSettings settings)
+    public void Write(LightSettings settings) => _device.SetFeature(EncodeReport(settings));
+
+    internal static byte[] EncodeReport(LightSettings settings)
     {
         var colors = settings.ParseColors();
         var data = new byte[ReportLength];
@@ -101,7 +117,23 @@ internal sealed class KeyboardLight : IDisposable
             data[7 + i * 3] = colors[i].G;
             data[8 + i * 3] = colors[i].B;
         }
-        _device.SetFeature(data);
+        return data;
+    }
+
+    internal static LightSettings DecodeReport(byte[] data)
+    {
+        var count = Math.Clamp((int)data[5], 1, MaxColors);
+        var colors = new List<string>();
+        for (int i = 0; i < count; i++)
+            colors.Add($"{data[6 + i * 3]:X2}{data[7 + i * 3]:X2}{data[8 + i * 3]:X2}");
+
+        return new LightSettings
+        {
+            Mode = Enum.IsDefined(typeof(LightMode), data[2]) ? (LightMode)data[2] : LightMode.Off,
+            Speed = Math.Clamp((int)data[3], 0, MaxSpeed),
+            Brightness = Math.Clamp((int)data[4], 0, MaxBrightness),
+            Colors = colors,
+        };
     }
 
     public void Dispose() => _device.Dispose();

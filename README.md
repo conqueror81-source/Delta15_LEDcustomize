@@ -7,15 +7,19 @@ MSI Delta 15 A5EFK などに搭載されている **MysticLight MS-1562** キー
 - 設定は `%ProgramData%\MsiKbLight\config.json` に保存
 - タスクスケジューラ（SYSTEM 権限）で **起動時・ログオン時・スリープ/休止/モダンスタンバイ復帰時** に自動で再適用
 - 常駐プロセスなし
+- いつでも **ライティング制御を解除** して、本ツール使用前の状態に戻せる
+- GUI は日本語 / 英語、ライト / ダーク（Windows 11 では Mica）に対応
 
 ## 必要なもの
 
-- .NET 8 SDK（ビルド用）／ .NET 8 Desktop Runtime（実行用、SDK に同梱）
+- .NET 8 以降の Desktop Runtime（実行用）。.NET 8 がなければ 9 / 10 / 11 … の新しいランタイムで自動的に動く
+- .NET 8 以降の SDK（ビルド用）
 
 ## ビルド
 
 ```powershell
 dotnet publish src\MsiKbLight -c Release -o publish
+dotnet test tests\MsiKbLight.Tests            # 単体テスト（プロトコル・設定ファイル・翻訳）
 ```
 
 `publish\` に `msikblight.dll` と `msikblight.cmd` ができる。
@@ -39,7 +43,30 @@ Smart App Control が有効な環境では、自分でビルドした署名な�
 - 「保存」で次回起動時にも使う設定として記録
 - 「元に戻す」で保存済み（未保存なら起動時）の状態に戻す
 - 「再起動・スリープ復帰時の自動適用」の「有効にする」で、UAC 確認のあとインストールとタスク登録を行う
+  - 登録先のファイルが消えている場合は「修復する」、インストール済みのバージョンが古い場合は「更新する」が表示される
+- 「表示」でテーマ（システム設定に従う / ライト / ダーク）と言語（自動 / 日本語 / English）を切り替え（`%AppData%\MsiKbLight\ui.json` に保存）
+- 「ライティング制御の解除」→ 下記
 - MSI Center が動作中の場合は警告を表示
+
+### テーマと Mica
+
+- Windows 11 22H2 以降では Mica バックドロップを使用。ダークテーマではウィンドウ全体、ライトテーマではタイトルバーに適用される
+  （WinForms の GDI 描画では、透過面に暗い文字を描けないため）
+- それより古い Windows では Mica なしの通常のダーク / ライト表示
+- ハイコントラストモードではシステムの配色に従う
+- 「システム設定に従う」の場合、Windows のテーマ変更に即座に追従する
+
+## ライティング制御の解除
+
+GUI の「解除…」、または `msikblight release` で、本ツールによる制御をすべて取り除く。MSI Center に制御を戻したいときなどに使う。
+
+1. ライティングを **本ツール使用前の状態** に戻す（初めてキーボードに書き込む直前の状態を `original.json` に自動記録している。
+   記録がない場合 ― 2.0 より前のバージョンから使っている場合など ― は現在のライティングのまま）
+2. 自動適用タスクとスタートメニューのショートカットを削除
+3. `%ProgramData%\MsiKbLight`（設定・記録・ログ）を削除
+4. `C:\Program Files\MsiKbLight` を削除（スタートメニューから起動した GUI が使用中のファイルは、GUI の終了後または次回再起動時に削除）
+
+インストール済みの場合は管理者権限が必要（GUI では UAC 確認が出る）。
 
 ## CLI
 
@@ -51,8 +78,10 @@ msikblight set colorshift -c FF0000,FFFF00,00FF00,00FFFF,0000FF,FF00FF
 msikblight set rainbow
 msikblight set off
 msikblight apply                                 # 保存済み設定を再適用
+msikblight status                                # 自動適用の状態・各ファイルの場所
 msikblight install                               # 自動適用を有効化（管理者）
 msikblight uninstall                             # 自動適用を無効化（管理者）
+msikblight release                               # 制御を解除して使用前の状態に戻す（インストール済みなら管理者）
 ```
 
 | モード | GUI 表記 | 使用する色 |
@@ -68,6 +97,7 @@ msikblight uninstall                             # 自動適用を無効化（�
 - `-b, --brightness` 0〜10（**実機では 9 以上は 8 に丸められる**。GUI は 0〜8）
 - `-s, --speed` 0=遅い / 1=普通 / 2=速い
 - `--no-save` 適用のみで保存しない
+- 終了コード: 0=成功、1=失敗、3=`release` は成功したが一部ファイルの削除が再起動待ち
 
 ## 自動適用（再起動後も維持）
 
@@ -76,9 +106,33 @@ GUI の「有効にする」、または管理者権限で `msikblight install` 
 1. `C:\Program Files\MsiKbLight` にファイルをコピー
 2. `%ProgramData%\MsiKbLight` に一般ユーザーの書き込み権限を付与（GUI / `set` で保存した設定をタスクが読めるように）
 3. タスク `MsiKbLight` を登録（起動時・ログオン時・復帰時に実行）
-4. スタートメニューに「MSI キーボード ライティング」を登録
+4. スタートメニューに「MSI キーボード ライティング」（英語 UI では「MSI Keyboard Lighting」）を登録
 
 **MSI Center は併用しないこと。** MSI Center（Mystic Light / LightKeeperService）が起動時に独自の設定を書き込み、上書きされる。
+
+## 長期運用のための設計
+
+| 想定される変化 | 対策 |
+|---|---|
+| .NET 8 のサポート終了（2026-11）・削除 | `RollForward=Major`。.NET 8 があればそれを使い、なければ新しいメジャーバージョンで起動 |
+| `dotnet.exe` の場所が変わる | 実行中のホスト → インストーラのレジストリ記録 → 既定パスの順に解決。タスクの登録先が消えたら GUI に「要修復」と表示し、ワンクリックで再登録 |
+| 古いバージョンがインストールされたまま | 起動中の GUI より古ければ「更新する」と表示 |
+| 書き込み中の電源断・クラッシュ | 設定は一時ファイル経由のアトミック置換で保存し、直前の版を `config.json.bak` に保持。本体が読めなければ自動でバックアップを使う |
+| 設定ファイル形式の変更 | `SchemaVersion` を記録。未知の項目は無視、欠けた項目は既定値、コメント・末尾カンマも許容 |
+| 起動・復帰直後にデバイスが不安定 | 最大 60 秒、デバイスの出現と書き込み成功までリトライ |
+| 無人実行での不具合調査 | `%ProgramData%\MsiKbLight\logs\msikblight.log`（512 KB でローテーション）に適用結果とエラーを記録 |
+| 翻訳漏れ | UI 文字列はすべて `Strings` の `required` プロパティ。訳漏れはコンパイルエラー、プレースホルダの不一致はテストで検出 |
+| プロトコル処理の退行 | レポートのエンコード / デコードを単体テスト化 |
+
+## ファイル
+
+| パス | 内容 |
+|---|---|
+| `%ProgramData%\MsiKbLight\config.json`（`.bak`） | 保存済みのライティング設定（全ユーザー共通） |
+| `%ProgramData%\MsiKbLight\original.json` | 本ツール使用前のライティング（解除時に復元） |
+| `%ProgramData%\MsiKbLight\logs\` | ログ |
+| `%AppData%\MsiKbLight\ui.json` | テーマ・言語（ユーザーごと） |
+| `C:\Program Files\MsiKbLight\` | インストール先（自動適用タスクが使用） |
 
 ## プロトコル
 

@@ -13,11 +13,16 @@
          through the Microsoft-signed dotnet.exe (see msikblight.cmd and TaskInstaller). -->
     <UseAppHost>false</UseAppHost>
     <SelfContained>false</SelfContained>
-    <Version>1.1.0</Version>
+    <!-- Run on .NET 8 when present, otherwise on the next newer major runtime (9, 10, 11, ...),
+         so the tool keeps working after .NET 8 reaches end of support and is removed. -->
+    <RollForward>Major</RollForward>
+    <SatelliteResourceLanguages>en;ja</SatelliteResourceLanguages>
+    <Version>2.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="msikblight.cmd" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <InternalsVisibleTo Include="MsiKbLight.Tests" />
   </ItemGroup>
 
 </Project>

@@ -1,23 +1,22 @@
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace MsiKbLight;
 
-/// <summary>Settings window. Changes are previewed on the keyboard immediately; 保存 makes them persistent.</summary>
+/// <summary>Settings window. Changes are previewed on the keyboard immediately; Save makes them persistent.</summary>
 internal sealed class MainForm : Form
 {
     // The controller accepts 0-10 but caps anything above 8.
     private const int UiMaxBrightness = 8;
 
-    private static readonly (LightMode Mode, string Label)[] Modes =
+    private static readonly LightMode[] Modes =
     [
-        (LightMode.Off, "消灯"),
-        (LightMode.Static, "点灯（単色）"),
-        (LightMode.Breathing, "呼吸"),
-        (LightMode.Flashing, "点滅"),
-        (LightMode.DoubleFlashing, "2 回点滅"),
-        (LightMode.ColorShift, "カラーシフト"),
-        (LightMode.Rainbow, "レインボー"),
+        LightMode.Off, LightMode.Static, LightMode.Breathing, LightMode.Flashing,
+        LightMode.DoubleFlashing, LightMode.ColorShift, LightMode.Rainbow,
     ];
+
+    private static readonly ThemePreference[] Themes = [ThemePreference.System, ThemePreference.Light, ThemePreference.Dark];
+    private static readonly UiLanguage[] Languages = [UiLanguage.Auto, UiLanguage.Japanese, UiLanguage.English];
 
     private static readonly Color[] DefaultShiftColors =
     [
@@ -27,40 +26,69 @@ internal sealed class MainForm : Form
     ];
 
     private readonly Label _deviceLabel = new() { AutoSize = true };
-    private readonly Label _msiCenterWarning = new()
-    {
-        AutoSize = true,
-        ForeColor = Color.Firebrick,
-        Text = "⚠ MSI Center が動作中です。設定が上書きされる場合があります。",
-        Visible = false,
-    };
-    private readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
-    private readonly NumericUpDown _colorCount = new() { Minimum = 1, Maximum = KeyboardLight.MaxColors, Width = 60 };
-    private readonly Label _colorCountLabel = new() { Text = "色数", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly Label _msiCenterWarning = new() { AutoSize = true, Visible = false };
+
+    private readonly Label _lightingHeader = SectionHeader();
+    private readonly Label _autoApplyHeader = SectionHeader();
+    private readonly Label _displayHeader = SectionHeader();
+    private readonly Label _releaseHeader = SectionHeader();
+
+    private readonly Label _modeLabel = RowLabel();
+    private readonly Label _colorLabel = RowLabel();
+    private readonly Label _brightnessLabel = RowLabel();
+    private readonly Label _speedLabel = RowLabel();
+    private readonly Label _themeLabel = RowLabel();
+    private readonly Label _languageLabel = RowLabel();
+
+    private readonly ComboBox _mode = DropDown(200);
+    private readonly ComboBox _colorCount = DropDown(60);
+    private readonly Label _colorCountLabel = new() { AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly FlowLayoutPanel _colorPanel = new() { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
     private readonly Button[] _colorButtons = new Button[KeyboardLight.MaxColors];
     private readonly TrackBar _brightness = new()
     {
-        Minimum = 0, Maximum = UiMaxBrightness, TickStyle = TickStyle.BottomRight, Width = 220, LargeChange = 1,
+        Minimum = 0, Maximum = UiMaxBrightness, TickStyle = TickStyle.None, Width = 220, LargeChange = 1, AutoSize = false, Height = 30,
     };
     private readonly Label _brightnessValue = new() { AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly ComboBox _speed = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
-    private readonly Button _save = new() { Text = "保存", AutoSize = true };
-    private readonly Button _revert = new() { Text = "元に戻す", AutoSize = true };
-    private readonly Label _autoApplyStatus = new() { AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly Button _autoApplyToggle = new() { AutoSize = true };
-    private readonly ToolStripStatusLabel _status = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ComboBox _speed = DropDown(120);
+    private readonly Button _save = new() { AutoSize = true, MinimumSize = new Size(88, 30) };
+    private readonly Button _revert = new() { AutoSize = true, MinimumSize = new Size(88, 30) };
+
+    private readonly Label _autoApplyStatus = new() { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(320, 0) };
+    private readonly Button _autoApplyToggle = new() { AutoSize = true, MinimumSize = new Size(88, 30), Anchor = AnchorStyles.Right };
+
+    private readonly ComboBox _theme = DropDown(220);
+    private readonly ComboBox _language = DropDown(220);
+
+    private readonly Label _releaseDescription = new() { AutoSize = true, MaximumSize = new Size(320, 0), Anchor = AnchorStyles.Left };
+    private readonly Button _release = new() { AutoSize = true, MinimumSize = new Size(88, 30), Anchor = AnchorStyles.Right };
+
+    private readonly Label _status = new() { AutoSize = true, MaximumSize = new Size(440, 0), Margin = new Padding(2, 10, 0, 0) };
     private readonly System.Windows.Forms.Timer _applyTimer = new() { Interval = 120 };
+
+    private readonly List<CardPanel> _cards = [];
+    private readonly Button[] _textButtons;
+    private readonly ComboBox[] _combos;
+    private readonly Label[] _headers;
+
+    private readonly UiPreferences _prefs = UiPreferences.Load();
+    private Palette _palette;
+    private Font? _headerFont;
 
     private string? _savedSnapshot;
     private string? _baselineSnapshot;
     private LightSettings? _initialSettings;
     private bool _loading;
+    private bool? _deviceFound;
+    private ushort _deviceProductId;
+    private AutoApplyState _autoApplyState;
+    private bool _skipClosePrompt;
+
+    private static Strings S => Strings.Current;
 
     public MainForm()
     {
-        Text = "MSI キーボード ライティング";
-        Font = new Font("Yu Gothic UI", 9.75f);
+        AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -76,23 +104,71 @@ internal sealed class MainForm : Form
             // Default icon is fine.
         }
 
+        _textButtons = [_save, _revert, _autoApplyToggle, _release];
+        _combos = [_mode, _colorCount, _speed, _theme, _language];
+        _headers = [_lightingHeader, _autoApplyHeader, _displayHeader, _releaseHeader];
+
         BuildLayout();
 
-        foreach (var (_, label) in Modes)
-            _mode.Items.Add(label);
-        _speed.Items.AddRange(["遅い", "普通", "速い"]);
+        for (int i = 1; i <= KeyboardLight.MaxColors; i++)
+            _colorCount.Items.Add(i.ToString());
+
+        Strings.Use(_prefs.Language);
+        _palette = Theme.Resolve(_prefs.Theme);
+        ApplyTexts();
+        ApplyTheme();
+
+        foreach (var combo in _combos)
+        {
+            var c = combo;
+            c.HandleCreated += (_, _) => Theme.ApplyControlTheme(c, _palette.IsDark);
+        }
 
         _mode.SelectedIndexChanged += (_, _) => { UpdateControlStates(); OnSettingChanged(); };
-        _colorCount.ValueChanged += (_, _) => { UpdateControlStates(); OnSettingChanged(); };
+        _colorCount.SelectedIndexChanged += (_, _) => { UpdateControlStates(); OnSettingChanged(); };
         _brightness.ValueChanged += (_, _) => { _brightnessValue.Text = $"{_brightness.Value} / {UiMaxBrightness}"; OnSettingChanged(); };
         _speed.SelectedIndexChanged += (_, _) => OnSettingChanged();
+        _theme.SelectedIndexChanged += (_, _) => OnThemeSelected();
+        _language.SelectedIndexChanged += (_, _) => OnLanguageSelected();
         _applyTimer.Tick += (_, _) => { _applyTimer.Stop(); ApplyToDevice(CurrentSettings()); };
         _save.Click += (_, _) => Save();
+        _save.EnabledChanged += (_, _) => StyleButton(_save);
         _revert.Click += (_, _) => Revert();
         _autoApplyToggle.Click += (_, _) => ToggleAutoApply();
+        _release.Click += (_, _) => ReleaseControl();
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
         Load += (_, _) => Initialize();
         FormClosing += OnFormClosing;
+    }
+
+    private static Label SectionHeader() => new() { AutoSize = true, Margin = new Padding(2, 14, 0, 6) };
+
+    private static Label RowLabel() => new() { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 8, 16, 8) };
+
+    private static ComboBox DropDown(int width) => new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = width };
+
+    private CardPanel NewCard(int columns)
+    {
+        var card = new CardPanel
+        {
+            AutoSize = true,
+            ColumnCount = columns,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(14, 8, 14, 8),
+            Margin = new Padding(0),
+        };
+        for (int i = 0; i < columns; i++)
+            card.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _cards.Add(card);
+        return card;
+    }
+
+    private static void AddRow(TableLayoutPanel grid, Label label, Control control)
+    {
+        grid.Controls.Add(label);
+        control.Margin = new Padding(0, 4, 0, 4);
+        grid.Controls.Add(control);
     }
 
     private void BuildLayout()
@@ -101,31 +177,22 @@ internal sealed class MainForm : Form
         {
             AutoSize = true,
             ColumnCount = 1,
-            Padding = new Padding(14, 12, 14, 8),
+            Padding = new Padding(18, 12, 18, 14),
             Dock = DockStyle.Fill,
         };
 
-        var header = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, Margin = new Padding(0, 0, 0, 6) };
+        var header = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(2, 0, 0, 0) };
         header.Controls.Add(_deviceLabel);
         header.Controls.Add(_msiCenterWarning);
         root.Controls.Add(header);
 
-        var lighting = new GroupBox { Text = "ライティング", AutoSize = true, Padding = new Padding(10, 6, 10, 8), Dock = DockStyle.Fill };
-        var grid = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Fill };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-
-        void AddRow(string label, Control control)
-        {
-            grid.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 8, 12, 8) });
-            control.Margin = new Padding(0, 4, 0, 4);
-            grid.Controls.Add(control);
-        }
-
-        AddRow("モード", _mode);
+        // Lighting
+        root.Controls.Add(_lightingHeader);
+        var lighting = NewCard(2);
+        AddRow(lighting, _modeLabel, _mode);
 
         var countRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-        _colorCountLabel.Margin = new Padding(0, 6, 4, 0);
+        _colorCountLabel.Margin = new Padding(0, 7, 6, 0);
         countRow.Controls.Add(_colorCountLabel);
         countRow.Controls.Add(_colorCount);
         var colorBlock = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
@@ -142,22 +209,18 @@ internal sealed class MainForm : Form
                 Margin = new Padding(0, 2, 6, 2),
                 Tag = index,
             };
-            button.FlatAppearance.BorderColor = SystemColors.ControlDarkDark;
             button.Click += (_, _) => PickColor(index);
             _colorButtons[i] = button;
             _colorPanel.Controls.Add(button);
         }
-        AddRow("色", colorBlock);
+        AddRow(lighting, _colorLabel, colorBlock);
 
         var brightnessRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         brightnessRow.Controls.Add(_brightness);
-        _brightnessValue.Margin = new Padding(4, 10, 0, 0);
+        _brightnessValue.Margin = new Padding(4, 6, 0, 0);
         brightnessRow.Controls.Add(_brightnessValue);
-        AddRow("明るさ", brightnessRow);
-
-        AddRow("速度", _speed);
-
-        lighting.Controls.Add(grid);
+        AddRow(lighting, _brightnessLabel, brightnessRow);
+        AddRow(lighting, _speedLabel, _speed);
         root.Controls.Add(lighting);
 
         var buttons = new FlowLayoutPanel
@@ -165,34 +228,207 @@ internal sealed class MainForm : Form
             AutoSize = true,
             FlowDirection = FlowDirection.RightToLeft,
             Dock = DockStyle.Fill,
-            Margin = new Padding(0, 8, 0, 8),
+            Margin = new Padding(0, 10, 0, 0),
         };
+        _revert.Margin = new Padding(0, 0, 8, 0);
+        _save.Margin = Padding.Empty;
         buttons.Controls.Add(_save);
         buttons.Controls.Add(_revert);
         root.Controls.Add(buttons);
 
-        var autoApply = new GroupBox { Text = "再起動・スリープ復帰時の自動適用", AutoSize = true, Padding = new Padding(10, 6, 10, 8), Dock = DockStyle.Fill };
-        var autoRow = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Fill };
-        autoRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        autoRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        autoRow.Controls.Add(_autoApplyStatus);
-        autoRow.Controls.Add(_autoApplyToggle);
-        autoApply.Controls.Add(autoRow);
+        // Auto-apply
+        root.Controls.Add(_autoApplyHeader);
+        var autoApply = NewCard(2);
+        autoApply.ColumnStyles[0] = new ColumnStyle(SizeType.Percent, 100);
+        autoApply.Controls.Add(_autoApplyStatus);
+        autoApply.Controls.Add(_autoApplyToggle);
         root.Controls.Add(autoApply);
 
-        var statusStrip = new StatusStrip { SizingGrip = false };
-        statusStrip.Items.Add(_status);
+        // Appearance
+        root.Controls.Add(_displayHeader);
+        var display = NewCard(2);
+        AddRow(display, _themeLabel, _theme);
+        AddRow(display, _languageLabel, _language);
+        root.Controls.Add(display);
+
+        // Release
+        root.Controls.Add(_releaseHeader);
+        var release = NewCard(2);
+        release.ColumnStyles[0] = new ColumnStyle(SizeType.Percent, 100);
+        _releaseDescription.Margin = new Padding(0, 6, 16, 6);
+        release.Controls.Add(_releaseDescription);
+        release.Controls.Add(_release);
+        root.Controls.Add(release);
+
+        root.Controls.Add(_status);
 
         Controls.Add(root);
-        Controls.Add(statusStrip);
         AcceptButton = _save;
     }
+
+    // ---- Language and theme ----
+
+    private void ApplyTexts()
+    {
+        var s = S;
+        SuspendLayout();
+        var oldFont = Font;
+        Font = new Font(s.FontFamily, 9.75f);
+        if (!ReferenceEquals(oldFont, DefaultFont))
+            oldFont.Dispose();
+        var oldHeaderFont = _headerFont;
+        _headerFont = new Font(s.FontFamily + " Semibold", 11f);
+        foreach (var h in _headers)
+            h.Font = _headerFont;
+        oldHeaderFont?.Dispose();
+
+        _lightingHeader.Text = s.LightingSection;
+        _autoApplyHeader.Text = s.AutoApplySection;
+        _displayHeader.Text = s.DisplaySection;
+        _releaseHeader.Text = s.ReleaseSection;
+        _modeLabel.Text = s.ModeLabel;
+        _colorLabel.Text = s.ColorLabel;
+        _colorCountLabel.Text = s.ColorCountLabel;
+        _brightnessLabel.Text = s.BrightnessLabel;
+        _speedLabel.Text = s.SpeedLabel;
+        _themeLabel.Text = s.ThemeLabel;
+        _languageLabel.Text = s.LanguageLabel;
+        _save.Text = s.Save;
+        _revert.Text = s.Revert;
+        _release.Text = s.ReleaseButton;
+        _releaseDescription.Text = s.ReleaseDescription;
+        _msiCenterWarning.Text = s.MsiCenterWarning;
+
+        ReplaceItems(_mode, Modes.Select(s.ModeName));
+        ReplaceItems(_speed, [s.SpeedSlow, s.SpeedNormal, s.SpeedFast]);
+        ReplaceItems(_theme, [s.ThemeSystem, s.ThemeLight, s.ThemeDark], Array.IndexOf(Themes, _prefs.Theme));
+        ReplaceItems(_language, [s.LanguageAuto, "日本語", "English"], Array.IndexOf(Languages, _prefs.Language));
+
+        UpdateDeviceLabel();
+        UpdateAutoApplyLabels();
+        UpdateDirtyState();
+        if (_mode.SelectedIndex < 0)
+            Text = s.AppTitle;
+        ResumeLayout(true);
+    }
+
+    private void ReplaceItems(ComboBox combo, IEnumerable<string> items, int? select = null)
+    {
+        var wasLoading = _loading;
+        _loading = true;
+        try
+        {
+            var index = select ?? combo.SelectedIndex;
+            combo.BeginUpdate();
+            combo.Items.Clear();
+            combo.Items.AddRange(items.Cast<object>().ToArray());
+            combo.SelectedIndex = index >= 0 && index < combo.Items.Count ? index : -1;
+            combo.EndUpdate();
+        }
+        finally
+        {
+            _loading = wasLoading;
+        }
+    }
+
+    private void ApplyTheme()
+    {
+        var p = _palette = Theme.Resolve(_prefs.Theme);
+        SuspendLayout();
+        BackColor = p.Window;
+        ForeColor = p.Text;
+        foreach (var card in _cards)
+        {
+            card.BackColor = p.Card;
+            card.BorderColor = p.CardBorder;
+            card.Invalidate();
+        }
+        foreach (var h in _headers)
+            h.ForeColor = p.Text;
+        foreach (var b in _textButtons)
+            StyleButton(b);
+        foreach (var b in _colorButtons)
+            b.FlatAppearance.BorderColor = p.ButtonBorder;
+        foreach (var combo in _combos)
+        {
+            combo.BackColor = p.Input;
+            combo.ForeColor = p.Text;
+            Theme.ApplyControlTheme(combo, p.IsDark);
+        }
+        _colorCountLabel.ForeColor = p.Text;
+        _brightness.BackColor = p.Card;
+        _brightnessValue.ForeColor = p.SubtleText;
+        _releaseDescription.ForeColor = p.SubtleText;
+        _status.ForeColor = p.SubtleText;
+        _msiCenterWarning.ForeColor = p.Error;
+        UpdateDeviceLabel();
+        UpdateAutoApplyLabels();
+        Theme.ApplyFrame(this, p);
+        ResumeLayout(true);
+        Invalidate(true);
+    }
+
+    private void StyleButton(Button b)
+    {
+        var p = _palette;
+        var primary = b == _save && b.Enabled;
+        b.FlatStyle = FlatStyle.Flat;
+        b.UseVisualStyleBackColor = false;
+        b.BackColor = primary ? p.Accent : p.Button;
+        b.ForeColor = primary ? p.OnAccent : p.Text;
+        b.FlatAppearance.BorderColor = primary ? p.Accent : p.ButtonBorder;
+        b.FlatAppearance.MouseOverBackColor = primary ? ControlPaint.Light(p.Accent, 0.1f) : p.ButtonHover;
+        b.FlatAppearance.MouseDownBackColor = primary ? ControlPaint.Dark(p.Accent, 0.05f) : p.ButtonBorder;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Theme.ApplyFrame(this, _palette);
+    }
+
+    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if ((e.Category is UserPreferenceCategory.General or UserPreferenceCategory.Color or UserPreferenceCategory.Accessibility)
+            && IsHandleCreated && !IsDisposed)
+            BeginInvoke(ApplyTheme);
+    }
+
+    private void OnThemeSelected()
+    {
+        if (_loading || _theme.SelectedIndex < 0)
+            return;
+        _prefs.Theme = Themes[_theme.SelectedIndex];
+        _prefs.Save();
+        ApplyTheme();
+    }
+
+    private void OnLanguageSelected()
+    {
+        if (_loading || _language.SelectedIndex < 0)
+            return;
+        _prefs.Language = Languages[_language.SelectedIndex];
+        _prefs.Save();
+        Strings.Use(_prefs.Language);
+        ApplyTexts();
+        SetStatus(""); // The old message is in the previous language.
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        base.OnFormClosed(e);
+    }
+
+    // ---- Lighting ----
 
     private void Initialize()
     {
         _loading = true;
         try
         {
+            SetStatus("");
+            _savedSnapshot = null;
             LightSettings? settings = null;
             try
             {
@@ -201,32 +437,26 @@ internal sealed class MainForm : Form
             }
             catch (Exception ex)
             {
-                SetStatus($"保存済み設定を読み込めませんでした: {ex.Message}");
+                SetStatus(string.Format(S.StatusLoadFailed, ex.Message));
             }
 
             using (var light = KeyboardLight.Open())
             {
-                if (light is null)
+                _deviceFound = light is not null;
+                _deviceProductId = light?.ProductId ?? 0;
+                if (light is not null && settings is null)
                 {
-                    _deviceLabel.Text = "デバイス: 未検出（MysticLight MS-1562 が見つかりません）";
-                    _deviceLabel.ForeColor = Color.Firebrick;
-                }
-                else
-                {
-                    _deviceLabel.Text = $"デバイス: MysticLight MS-1562（PID 0x{light.ProductId:X4}）";
-                    if (settings is null)
+                    try
                     {
-                        try
-                        {
-                            settings = light.Read();
-                        }
-                        catch (Exception ex)
-                        {
-                            SetStatus($"現在の設定を読み出せませんでした: {ex.Message}");
-                        }
+                        settings = light.Read();
+                    }
+                    catch (Exception ex)
+                    {
+                        SetStatus(string.Format(S.StatusReadFailed, ex.Message));
                     }
                 }
             }
+            UpdateDeviceLabel();
 
             _initialSettings = settings;
             ShowSettings(settings ?? new LightSettings());
@@ -235,12 +465,23 @@ internal sealed class MainForm : Form
             _msiCenterWarning.Visible = IsMsiCenterRunning();
             RefreshAutoApplyState();
             if (string.IsNullOrEmpty(_status.Text))
-                SetStatus(_savedSnapshot is null ? "保存済みの設定はありません。" : "保存済みの設定を読み込みました。");
+                SetStatus(_savedSnapshot is null ? S.StatusNoSaved : S.StatusLoadedSaved);
         }
         finally
         {
             _loading = false;
         }
+    }
+
+    private void UpdateDeviceLabel()
+    {
+        if (_deviceFound is null)
+        {
+            _deviceLabel.Text = "";
+            return;
+        }
+        _deviceLabel.Text = _deviceFound.Value ? string.Format(S.DeviceFound, _deviceProductId) : S.DeviceNotFound;
+        _deviceLabel.ForeColor = _deviceFound.Value ? _palette.SubtleText : _palette.Error;
     }
 
     private void ShowSettings(LightSettings settings)
@@ -249,7 +490,7 @@ internal sealed class MainForm : Form
         _loading = true;
         try
         {
-            _mode.SelectedIndex = Math.Max(0, Array.FindIndex(Modes, m => m.Mode == settings.Mode));
+            _mode.SelectedIndex = Math.Max(0, Array.IndexOf(Modes, settings.Mode));
             _brightness.Value = Math.Clamp(settings.Brightness, 0, UiMaxBrightness);
             _brightnessValue.Text = $"{_brightness.Value} / {UiMaxBrightness}";
             _speed.SelectedIndex = Math.Clamp(settings.Speed, 0, KeyboardLight.MaxSpeed);
@@ -269,9 +510,10 @@ internal sealed class MainForm : Form
                     ? Color.FromArgb(colors[i].R, colors[i].G, colors[i].B)
                     : DefaultShiftColors[i];
             }
-            _colorCount.Value = settings.Mode == LightMode.ColorShift
+            var count = settings.Mode == LightMode.ColorShift
                 ? Math.Clamp(colors.Count, 1, KeyboardLight.MaxColors)
                 : KeyboardLight.MaxColors;
+            _colorCount.SelectedIndex = count - 1;
             UpdateControlStates();
         }
         finally
@@ -280,12 +522,12 @@ internal sealed class MainForm : Form
         }
     }
 
-    private LightMode SelectedMode => Modes[Math.Max(0, _mode.SelectedIndex)].Mode;
+    private LightMode SelectedMode => Modes[Math.Max(0, _mode.SelectedIndex)];
 
     private int VisibleColorCount => SelectedMode switch
     {
         LightMode.Off or LightMode.Rainbow => 0,
-        LightMode.ColorShift => (int)_colorCount.Value,
+        LightMode.ColorShift => Math.Max(0, _colorCount.SelectedIndex) + 1,
         _ => 1,
     };
 
@@ -334,7 +576,7 @@ internal sealed class MainForm : Form
         var dirty = IsDirty;
         _save.Enabled = dirty || _savedSnapshot is null;
         _revert.Enabled = dirty;
-        Text = dirty ? "MSI キーボード ライティング *" : "MSI キーボード ライティング";
+        Text = dirty ? S.AppTitle + " *" : S.AppTitle;
     }
 
     private bool ApplyToDevice(LightSettings settings)
@@ -344,16 +586,17 @@ internal sealed class MainForm : Form
             using var light = KeyboardLight.Open();
             if (light is null)
             {
-                SetStatus("デバイスが見つかりません。");
+                SetStatus(S.StatusDeviceMissing);
                 return false;
             }
+            LightSettings.CaptureOriginal(light);
             light.Write(settings);
-            SetStatus(IsDirty ? "プレビュー中（未保存）" : "適用しました。");
+            SetStatus(IsDirty ? S.StatusPreview : S.StatusApplied);
             return true;
         }
         catch (Exception ex)
         {
-            SetStatus($"適用に失敗しました: {ex.Message}");
+            SetStatus(string.Format(S.StatusApplyFailed, ex.Message));
             return false;
         }
     }
@@ -373,20 +616,24 @@ internal sealed class MainForm : Form
         try
         {
             settings.Validate();
+            // Record the pre-tool state before the first config.json exists.
+            using (var light = KeyboardLight.Open())
+            {
+                if (light is not null)
+                    LightSettings.CaptureOriginal(light);
+            }
             settings.Save();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"保存できませんでした。\n\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, string.Format(S.SaveFailed, ex.Message), S.AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
         _savedSnapshot = settings.ToString();
         _baselineSnapshot = _savedSnapshot;
         UpdateDirtyState();
         if (ApplyToDevice(settings))
-            SetStatus(TaskInstaller.IsRegistered()
-                ? "保存しました。再起動後も維持されます。"
-                : "保存しました。再起動後も維持するには自動適用を有効にしてください。");
+            SetStatus(TaskInstaller.IsRegistered() ? S.StatusSavedPersistent : S.StatusSavedNeedsAutoApply);
     }
 
     private void Revert()
@@ -398,21 +645,34 @@ internal sealed class MainForm : Form
         ApplyToDevice(target);
     }
 
+    // ---- Auto-apply ----
+
     private void RefreshAutoApplyState()
     {
-        var registered = TaskInstaller.IsRegistered();
-        _autoApplyStatus.Text = registered ? "状態: 有効" : "状態: 無効";
-        _autoApplyStatus.ForeColor = registered ? Color.SeaGreen : SystemColors.GrayText;
-        _autoApplyToggle.Text = registered ? "無効にする" : "有効にする";
-        _autoApplyToggle.Tag = registered;
+        _autoApplyState = TaskInstaller.GetState();
+        UpdateAutoApplyLabels();
+    }
+
+    private void UpdateAutoApplyLabels()
+    {
+        var (status, button, color) = _autoApplyState switch
+        {
+            AutoApplyState.Enabled => (S.AutoApplyEnabled, S.Disable, _palette.Success),
+            AutoApplyState.NeedsRepair => (S.AutoApplyNeedsRepair, S.Repair, _palette.Error),
+            AutoApplyState.Outdated => (S.AutoApplyOutdated, S.Update, _palette.Error),
+            _ => (S.AutoApplyDisabled, S.Enable, _palette.SubtleText),
+        };
+        _autoApplyStatus.Text = status;
+        _autoApplyStatus.ForeColor = color;
+        _autoApplyToggle.Text = button;
     }
 
     private void ToggleAutoApply()
     {
-        var registered = _autoApplyToggle.Tag is true;
-        if (!registered && _savedSnapshot is null)
+        var disabling = _autoApplyState == AutoApplyState.Enabled;
+        if (_autoApplyState == AutoApplyState.Disabled && _savedSnapshot is null)
         {
-            MessageBox.Show(this, "先に「保存」で設定を保存してください。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, S.SaveFirst, S.AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -420,26 +680,17 @@ internal sealed class MainForm : Form
         _autoApplyToggle.Enabled = false;
         try
         {
-            var result = TaskInstaller.RunElevated(registered ? "uninstall" : "install");
+            var result = TaskInstaller.RunElevated(disabling ? "uninstall" : "install");
             if (result is null)
-            {
-                SetStatus("キャンセルされました。");
-            }
+                SetStatus(S.StatusCancelled);
             else if (result.Value.ExitCode != 0)
-            {
-                MessageBox.Show(this, $"処理に失敗しました（終了コード {result.Value.ExitCode}）。\n\n{result.Value.Output}".TrimEnd(),
-                    Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+                ShowError(string.Format(S.OperationFailedCode, result.Value.ExitCode, result.Value.Output).TrimEnd());
             else
-            {
-                SetStatus(registered
-                    ? "自動適用を無効にしました。"
-                    : $"自動適用を有効にしました（{TaskInstaller.InstallDirectory}、スタートメニューに登録）。");
-            }
+                SetStatus(disabling ? S.StatusAutoApplyDisabled : string.Format(S.StatusAutoApplyEnabled, TaskInstaller.InstallDirectory));
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"処理に失敗しました。\n\n{ex.Message}", Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowError(string.Format(S.OperationFailed, ex.Message));
         }
         finally
         {
@@ -449,12 +700,73 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    // ---- Release ----
+
+    private void ReleaseControl()
     {
-        if (!IsDirty)
+        if (MessageBox.Show(this, S.ReleaseConfirm, S.AppTitle, MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
 
-        var answer = MessageBox.Show(this, "変更が保存されていません。保存しますか？", Text,
+        _applyTimer.Stop();
+        var hadOriginal = LightSettings.LoadOriginal() is not null;
+        var closeAfter = TaskInstaller.IsRunningFromInstallDirectory;
+        UseWaitCursor = true;
+        _release.Enabled = false;
+        try
+        {
+            bool rebootPending;
+            if (TaskInstaller.ReleaseRequiresElevation())
+            {
+                var result = TaskInstaller.RunElevated("release");
+                if (result is null)
+                {
+                    SetStatus(S.StatusCancelled);
+                    return;
+                }
+                if (result.Value.ExitCode is not (0 or Cli.ExitRebootPending))
+                {
+                    ShowError(string.Format(S.OperationFailedCode, result.Value.ExitCode, result.Value.Output).TrimEnd());
+                    return;
+                }
+                rebootPending = result.Value.ExitCode == Cli.ExitRebootPending;
+            }
+            else
+            {
+                rebootPending = TaskInstaller.Release();
+            }
+
+            var message = hadOriginal ? S.ReleasedRestored : S.ReleasedKeptCurrent;
+            if (rebootPending)
+                message += "\n\n" + S.ReleaseRebootPending;
+            if (closeAfter)
+            {
+                MessageBox.Show(this, message + "\n\n" + S.ReleaseClosing, S.AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _skipClosePrompt = true;
+                Close();
+                return;
+            }
+            MessageBox.Show(this, message, S.AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Initialize();
+            SetStatus(message);
+        }
+        catch (Exception ex)
+        {
+            ShowError(string.Format(S.OperationFailed, ex.Message));
+        }
+        finally
+        {
+            UseWaitCursor = false;
+            _release.Enabled = true;
+        }
+    }
+
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (_skipClosePrompt || !IsDirty)
+            return;
+
+        var answer = MessageBox.Show(this, S.UnsavedChangesPrompt, S.AppTitle,
             MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         switch (answer)
         {
@@ -488,6 +800,9 @@ internal sealed class MainForm : Form
         }
         return false;
     }
+
+    private void ShowError(string message) =>
+        MessageBox.Show(this, message, S.AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
 
     private void SetStatus(string message) => _status.Text = message;
 }

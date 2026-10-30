@@ -2,6 +2,9 @@ namespace MsiKbLight;
 
 internal static class Cli
 {
+    /// <summary>"release" succeeded, but some installed files are only removed after the app closes or a restart.</summary>
+    public const int ExitRebootPending = 3;
+
     private const string Usage = """
         msikblight - MSI MS-1562 keyboard lighting control (no driver required)
 
@@ -10,8 +13,11 @@ internal static class Cli
           msikblight get                       Show the current lighting read from the controller
           msikblight set <mode> [options]      Apply lighting and save it as the persistent setting
           msikblight apply [--wait <sec>]      Apply the saved setting (used by the scheduled task)
+          msikblight status                    Show the auto-apply task state and file locations
           msikblight install                   Install to Program Files and register the auto-apply task (admin)
           msikblight uninstall                 Remove the scheduled task (admin)
+          msikblight release                   Release control: restore the original lighting and remove the
+                                               task, shortcut, saved settings and installed files (admin if installed)
 
         Modes:
           off | static | breathing | flashing | doubleflashing | colorshift | rainbow
@@ -33,15 +39,18 @@ internal static class Cli
 
     public static int Run(string[] args)
     {
+        var command = args[0].ToLowerInvariant();
         try
         {
-            return args[0].ToLowerInvariant() switch
+            return command switch
             {
                 "get" => Get(),
                 "set" => Set(args[1..]),
                 "apply" => Apply(args[1..]),
+                "status" => Status(),
                 "install" => Install(),
                 "uninstall" => Uninstall(),
+                "release" => Release(),
                 "help" or "-h" or "--help" or "/?" => Help(),
                 _ => Fail($"Unknown command: {args[0]}\n\n{Usage}"),
             };
@@ -52,6 +61,9 @@ internal static class Cli
         }
         catch (Exception ex)
         {
+            // "release" deletes the log directory; logging would recreate it.
+            if (command != "release")
+                AppLog.Error($"{command}: {ex}");
             return Fail($"{ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -68,11 +80,8 @@ internal static class Cli
         return 1;
     }
 
-    private static KeyboardLight OpenOrThrow(TimeSpan wait)
-    {
-        return KeyboardLight.OpenWithWait(wait)
-            ?? throw new InvalidOperationException("MysticLight MS-1562 controller (VID 1462, PID 1562-1564) not found.");
-    }
+    private static KeyboardLight OpenOrThrow(TimeSpan wait) =>
+        KeyboardLight.OpenWithWait(wait) ?? throw new DeviceNotFoundException();
 
     private static int Get()
     {
@@ -117,13 +126,17 @@ internal static class Cli
         settings.Validate();
 
         using (var light = OpenOrThrow(TimeSpan.Zero))
+        {
+            LightSettings.CaptureOriginal(light);
             light.Write(settings);
+        }
         Console.WriteLine($"applied: {settings}");
 
         if (save)
         {
             settings.Save();
             Console.WriteLine($"saved  : {LightSettings.ConfigPath}");
+            AppLog.Info($"set (saved): {settings}");
         }
         return 0;
     }
@@ -143,9 +156,21 @@ internal static class Cli
         if (settings is null)
             return Fail($"No saved setting ({LightSettings.ConfigPath}). Run 'msikblight set ...' first.");
 
-        using var light = OpenOrThrow(TimeSpan.FromSeconds(waitSec));
-        light.Write(settings);
+        KeyboardLight.WriteWithRetry(settings, TimeSpan.FromSeconds(waitSec));
         Console.WriteLine($"applied: {settings}");
+        AppLog.Info($"apply: {settings}");
+        return 0;
+    }
+
+    private static int Status()
+    {
+        Console.WriteLine($"version   : {typeof(Cli).Assembly.GetName().Version} (.NET {Environment.Version})");
+        Console.WriteLine($"auto-apply: {TaskInstaller.GetState()}");
+        Console.WriteLine($"host      : {TaskInstaller.DotnetHost}");
+        Console.WriteLine($"installed : {(Directory.Exists(TaskInstaller.InstallDirectory) ? TaskInstaller.InstallDirectory : "(no)")}");
+        Console.WriteLine($"config    : {LightSettings.ConfigPath}{(File.Exists(LightSettings.ConfigPath) ? "" : " (none)")}");
+        Console.WriteLine($"original  : {LightSettings.LoadOriginal()?.ToString() ?? "(not recorded)"}");
+        Console.WriteLine($"log       : {AppLog.LogPath}");
         return 0;
     }
 
@@ -163,6 +188,13 @@ internal static class Cli
             return Fail("uninstall requires an elevated (administrator) prompt.");
         TaskInstaller.Uninstall();
         return 0;
+    }
+
+    private static int Release()
+    {
+        if (TaskInstaller.ReleaseRequiresElevation() && !TaskInstaller.IsElevated())
+            return Fail("release requires an elevated (administrator) prompt because the tool is installed.");
+        return TaskInstaller.Release() ? ExitRebootPending : 0;
     }
 
     private static LightMode ParseMode(string s) => s.ToLowerInvariant() switch
