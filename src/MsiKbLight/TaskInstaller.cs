@@ -17,6 +17,75 @@ internal static class TaskInstaller
     public static string InstallDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "MsiKbLight");
 
+    /// <summary>The Microsoft-signed host every entry point goes through (Smart App Control blocks an unsigned apphost).</summary>
+    public static string DotnetHost =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe");
+
+    private static string AssemblyPath(string directory) => Path.Combine(directory, "msikblight.dll");
+
+    public static string ShortcutPath =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "MSI キーボード ライティング.lnk");
+
+    public static bool IsRegistered()
+    {
+        try
+        {
+            RunSchtasks($"/Query /TN \"{TaskName}\"");
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Runs this tool elevated (UAC prompt) with the given command. Returns the exit code and the captured output,
+    /// or null when the user cancelled the UAC prompt.
+    /// </summary>
+    public static (int ExitCode, string Output)? RunElevated(string command)
+    {
+        var logPath = Path.Combine(Path.GetTempPath(), $"msikblight-{Guid.NewGuid():N}.log");
+        var psi = new ProcessStartInfo(DotnetHost,
+            $"\"{AssemblyPath(AppContext.BaseDirectory)}\" {command} --log \"{logPath}\"")
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        try
+        {
+            using var p = Process.Start(psi)!;
+            p.WaitForExit();
+            var output = File.Exists(logPath) ? File.ReadAllText(logPath) : "";
+            return (p.ExitCode, output);
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223) // ERROR_CANCELLED
+        {
+            return null;
+        }
+        finally
+        {
+            if (File.Exists(logPath))
+                File.Delete(logPath);
+        }
+    }
+
+    // dotnet.exe is a console app; "conhost --headless" gives it an invisible console so only the window shows.
+    private static void CreateShortcut(string lnkPath, string assemblyPath)
+    {
+        var shellType = Type.GetTypeFromProgID("WScript.Shell")
+            ?? throw new InvalidOperationException("WScript.Shell is not available.");
+        dynamic shell = Activator.CreateInstance(shellType)!;
+        dynamic lnk = shell.CreateShortcut(lnkPath);
+        lnk.TargetPath = Path.Combine(Environment.SystemDirectory, "conhost.exe");
+        lnk.Arguments = $"--headless \"{DotnetHost}\" \"{assemblyPath}\"";
+        lnk.IconLocation = Path.Combine(Environment.SystemDirectory, "main.cpl") + ",1";
+        lnk.WorkingDirectory = Path.GetDirectoryName(assemblyPath);
+        lnk.Description = "MSI キーボード ライティングの設定";
+        lnk.Save();
+    }
+
     public static bool IsElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
@@ -33,7 +102,7 @@ internal static class TaskInstaller
             foreach (var file in Directory.GetFiles(sourceDir))
                 File.Copy(file, Path.Combine(InstallDirectory, Path.GetFileName(file)), overwrite: true);
         }
-        var exePath = Path.Combine(InstallDirectory, "msikblight.exe");
+        var assemblyPath = AssemblyPath(InstallDirectory);
         Console.WriteLine($"Installed to {InstallDirectory}");
 
         // Let non-elevated "set" calls update the config that the SYSTEM task reads.
@@ -46,7 +115,7 @@ internal static class TaskInstaller
         dir.SetAccessControl(acl);
 
         var xmlPath = Path.Combine(Path.GetTempPath(), $"{TaskName}.xml");
-        File.WriteAllText(xmlPath, BuildTaskXml(exePath), Encoding.Unicode);
+        File.WriteAllText(xmlPath, BuildTaskXml(assemblyPath), Encoding.Unicode);
         try
         {
             RunSchtasks($"/Create /TN \"{TaskName}\" /XML \"{xmlPath}\" /F");
@@ -56,17 +125,22 @@ internal static class TaskInstaller
             File.Delete(xmlPath);
         }
         Console.WriteLine($"Scheduled task '{TaskName}' registered (boot / logon / resume).");
+
+        CreateShortcut(ShortcutPath, assemblyPath);
+        Console.WriteLine($"Start menu shortcut created: {ShortcutPath}");
     }
 
     public static void Uninstall()
     {
         RunSchtasks($"/Delete /TN \"{TaskName}\" /F", ignoreFailure: true);
         Console.WriteLine($"Scheduled task '{TaskName}' removed.");
+        if (File.Exists(ShortcutPath))
+            File.Delete(ShortcutPath);
         if (Directory.Exists(InstallDirectory))
             Console.WriteLine($"Program files remain in {InstallDirectory} (delete manually if no longer needed).");
     }
 
-    private static string BuildTaskXml(string exePath)
+    private static string BuildTaskXml(string assemblyPath)
     {
         XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 
@@ -105,8 +179,8 @@ internal static class TaskInstaller
                     new XElement(ns + "Priority", "7")),
                 new XElement(ns + "Actions", new XAttribute("Context", "Author"),
                     new XElement(ns + "Exec",
-                        new XElement(ns + "Command", exePath),
-                        new XElement(ns + "Arguments", "apply --wait 60")))));
+                        new XElement(ns + "Command", DotnetHost),
+                        new XElement(ns + "Arguments", $"\"{assemblyPath}\" apply --wait 60")))));
 
         return doc.Declaration + doc.ToString();
     }

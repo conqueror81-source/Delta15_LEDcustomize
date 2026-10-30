@@ -1,17 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>msikblight</AssemblyName>
     <RootNamespace>MsiKbLight</RootNamespace>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- No apphost: Smart App Control blocks the unsigned msikblight.exe, so the tool always runs
+         through the Microsoft-signed dotnet.exe (see msikblight.cmd and TaskInstaller). -->
+    <UseAppHost>false</UseAppHost>
     <SelfContained>false</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
-    <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="msikblight.cmd" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>
